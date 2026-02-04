@@ -6,6 +6,7 @@ import { Sources } from './sources'
 import { ISource } from './sources/ISource'
 import { warnOnce } from 'maplibre-gl/src/util/util'
 import { SymbolPlacements } from './symbol/SymbolPlacements'
+import { EXTENT } from 'maplibre-gl/src/data/extent'
 
 export class VectorTileset {
   /**
@@ -14,6 +15,9 @@ export class VectorTileset {
    * @param {boolean} [options.showTileColor=false]
    * @param {string} [options.workerUrl] - Web Worker 脚本 URL，用于瓦片解析/几何计算；不传则走主线程
    * @param {number} [options.maximumActiveTasks=4] - 同时进行的 Worker 任务数，与 maxLoading 配合
+   * @param {number} [options.workerBatchSize=2] - 每批送入 Worker 的瓦片数（1～4），用于减少 postMessage 次数
+   * @param {number} [options.maxInitializing] - 每帧最多进入初始化的瓦片数；启用 Worker 时默认 12（提高吞吐），否则 6
+   * @param {number} [options.workerMinBytes=0] - 瓦片总 buffer 小于此字节数时走主线程，避免小瓦片 postMessage 开销；0 表示全部走 Worker
    */
   constructor(options) {
     this.maximumLevel = 24
@@ -38,11 +42,20 @@ export class VectorTileset {
     this.numLoading = 0
     this.maxLoading = 6
     this.numInitializing = 0
-    this.maxInitializing = 6
+    this.maxInitializing =
+      options.maxInitializing ?? (options.workerUrl ? 12 : 6)
     /**@type {Cesium.TaskProcessor|null} */
     this._taskProcessor = null
     this._workerUrl = options.workerUrl || null
     this._maximumActiveTasks = options.maximumActiveTasks ?? 4
+    this._workerBatchSize = Math.max(
+      1,
+      Math.min(4, (options.workerBatchSize ?? 2) | 0)
+    )
+    /** 瓦片总 buffer 小于此字节时走主线程，避免小瓦片 postMessage 开销；0 表示全部走 Worker */
+    this._workerMinBytes = Math.max(0, (options.workerMinBytes ?? 0) | 0)
+    /**@type {VectorTileLOD[]} 本帧待 Worker 处理的瓦片，在 update 中组批调度 */
+    this._pendingWorkerTiles = []
     /**@type {Cesium.Texture} */
     this.tileIdTexture = null
     this.zoom = 0
@@ -181,6 +194,7 @@ export class VectorTileset {
     renderList.beginFrame()
 
     this.numInitializing = 0
+    this._pendingWorkerTiles = []
 
     /**@type {Cesium.Globe} */
     const scene = frameState.camera._scene
@@ -207,6 +221,9 @@ export class VectorTileset {
       tile.expired = false
       tile.update(frameState, renderList, this)
     }
+
+    // 批调度：将本帧入队的待 Worker 瓦片按 workerBatchSize 组批并 scheduleTask
+    scheduleWorkerBatches(this, frameState)
 
     /**@type {VectorTileLOD[]} */
     const tilesToRender = globeSuspendLodUpdate
@@ -320,6 +337,102 @@ export class VectorTileset {
 
   isDestroyed() {
     return false
+  }
+}
+
+/**
+ * 将本帧 _pendingWorkerTiles 按 _workerBatchSize 组批并 scheduleTask，结果按 result.tiles 分发到各瓦片
+ * @param {VectorTileset} tileset
+ * @param {Cesium.FrameState} frameState
+ */
+function scheduleWorkerBatches(tileset, frameState) {
+  const pending = tileset._pendingWorkerTiles
+  const processor = tileset._taskProcessor
+  if (!processor || !pending.length) return
+
+  const batchSize = tileset._workerBatchSize
+  const maxInit = tileset.maxInitializing
+  const styleLayers = tileset._styleLayers.map(sl => ({
+    id: sl.id,
+    type: sl.type,
+    source: sl.source,
+    sourceLayer: sl.sourceLayer ?? sl.data['source-layer'],
+    filter: sl.data.filter,
+    paint: sl.data.paint,
+    layout: sl.data.layout
+  }))
+
+  while (pending.length && tileset.numInitializing < maxInit) {
+    const take = Math.min(
+      batchSize,
+      maxInit - tileset.numInitializing,
+      pending.length
+    )
+    const batch = pending.splice(0, take)
+    const parameters = {
+      styleLayers,
+      tiles: batch.map(tile => {
+        const sources = {}
+        for (const sourceId in tile.sources) {
+          const data = tile.sources[sourceId]
+          if (data && data.buffer) {
+            sources[sourceId] = {
+              buffer: data.buffer,
+              encoding: data.encoding || 'mvt'
+            }
+          }
+        }
+        return {
+          x: tile.x,
+          y: tile.y,
+          z: tile.z,
+          extent: EXTENT,
+          sources
+        }
+      })
+    }
+    const transferableObjects = []
+    for (const tile of batch) {
+      for (const sourceId in tile.sources) {
+        const data = tile.sources[sourceId]
+        if (data && data.buffer) transferableObjects.push(data.buffer)
+      }
+    }
+    batch.forEach(t => {
+      t.state = 'initializing'
+      t._workerGeneration = (t._workerGeneration || 0) + 1
+    })
+    const batchGenerations = batch.map(t => t._workerGeneration)
+    tileset.numInitializing += batch.length
+
+    const batchFrameState = frameState
+    const promise = processor.scheduleTask(parameters, transferableObjects)
+    if (Cesium.defined(promise)) {
+      promise
+        .then(result => {
+          if (!result || !Array.isArray(result.tiles)) return
+          for (let i = 0; i < batch.length && i < result.tiles.length; i++) {
+            const tile = batch[i]
+            if (tile._workerGeneration !== batchGenerations[i]) continue
+            const tileResult = result.tiles[i]
+            tile.createRenderLayersFromWorkerResult(
+              tileResult,
+              batchFrameState,
+              tileset
+            )
+          }
+        })
+        .catch(() => {
+          batch.forEach(t => {
+            t.state = 'error'
+          })
+        })
+    } else {
+      batch.forEach(t => {
+        t.state = 'loaded'
+      })
+      tileset.numInitializing -= batch.length
+    }
   }
 }
 

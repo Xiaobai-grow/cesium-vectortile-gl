@@ -91,6 +91,22 @@ function initConstants() {
   })
 }
 
+/**
+ * 统计瓦片所有 source 的 buffer 总字节数，用于决定是否走 Worker（小瓦片走主线程可减少 postMessage 开销）
+ * @param {VectorTileLOD} tile
+ * @returns {number}
+ */
+function getTileSourcesByteLength(tile) {
+  let total = 0
+  for (const sourceId in tile.sources) {
+    const data = tile.sources[sourceId]
+    if (data && data.buffer && data.buffer.byteLength !== undefined) {
+      total += data.buffer.byteLength
+    }
+  }
+  return total
+}
+
 export class VectorTileLOD {
   constructor(options) {
     initConstants()
@@ -556,53 +572,13 @@ export class VectorTileLOD {
       this.state === 'loaded' &&
       tileset.numInitializing < tileset.maxInitializing
     ) {
-      if (this._workerBuffers && tileset._taskProcessor) {
-        const parameters = {
-          sources: {},
-          x: this.x,
-          y: this.y,
-          z: this.z,
-          extent: EXTENT,
-          styleLayers: tileset._styleLayers.map(sl => ({
-            id: sl.id,
-            type: sl.type,
-            source: sl.source,
-            sourceLayer: sl.sourceLayer ?? sl.data['source-layer'],
-            filter: sl.data.filter,
-            paint: sl.data.paint,
-            layout: sl.data.layout
-          }))
-        }
-        const transferableObjects = []
-        for (const sourceId in this.sources) {
-          const data = this.sources[sourceId]
-          if (data && data.buffer) {
-            parameters.sources[sourceId] = {
-              buffer: data.buffer,
-              encoding: data.encoding || 'mvt'
-            }
-            transferableObjects.push(data.buffer)
-          }
-        }
-        const promise = tileset._taskProcessor.scheduleTask(
-          parameters,
-          transferableObjects
-        )
-        if (Cesium.defined(promise)) {
-          this.state = 'initializing'
-          tileset.numInitializing++
-          promise
-            .then(result => {
-              this.createRenderLayersFromWorkerResult(
-                result,
-                frameState,
-                tileset
-              )
-            })
-            .catch(() => {
-              this.state = 'error'
-            })
-        }
+      let useWorker =
+        this._workerBuffers &&
+        tileset._taskProcessor &&
+        (tileset._workerMinBytes <= 0 ||
+          getTileSourcesByteLength(this) >= tileset._workerMinBytes)
+      if (useWorker) {
+        tileset._pendingWorkerTiles.push(this)
       } else {
         this.state = 'initializing'
         tileset.numInitializing++

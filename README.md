@@ -111,6 +111,29 @@ const tileset = new VectorTileset({
 - 本地示例：运行 `npm run dev` 后打开 [worker.html](worker.html) 可查看启用 Web Worker 的示例。
 - **性能对比**：在浏览器中打开 [benchmark.html](benchmark.html)，点击「运行性能对比」可测量主线程 vs Worker 的帧时间、长帧数等（无需 Vitest，需真实浏览器与 WebGL）。
 
+### Worker 调优（若对比主线程无明显加速时）
+
+Worker 收益受「主线程后续开销」影响：结果回主线程后仍需创建 `Cesium.Geometry`/`Primitive` 等，若这部分占比较大，整体加速会有限。可尝试以下选项：
+
+| 选项              | 说明                                                                                           | 建议                                 |
+| ----------------- | ---------------------------------------------------------------------------------------------- | ------------------------------------ |
+| `maxInitializing` | 每帧最多进入初始化的瓦片数。启用 Worker 时默认 **12**（提高吞吐），不启用时 6。                | 可尝试 16～24，让 Worker 更饱和。    |
+| `workerBatchSize` | 每批送入 Worker 的瓦片数（1～4）。批越大 postMessage 次数越少，但单任务时间变长。              | 一般 2～3；若瓦片很轻可试 1。        |
+| `workerMinBytes`  | 瓦片总 buffer 小于此字节时**走主线程**，避免小瓦片 postMessage 开销。默认 0（全部走 Worker）。 | 可设 8192～16384，小瓦片主线程直做。 |
+
+```js
+const tileset = new VectorTileset({
+  style: '/assets/demotiles/style.json',
+  workerUrl,
+  maximumActiveTasks: 4,
+  maxInitializing: 16,
+  workerBatchSize: 2,
+  workerMinBytes: 8192
+})
+```
+
+**建议先用 Chrome 性能面板定位瓶颈**：录制几秒，看主线程时间主要花在「createRenderLayersFromWorkerResult / addLayerFromWorkerResult」还是「渲染/其它」；Worker 线程是否大部分时间在 processTileTask。若主线程「建几何/图元」占比高，可考虑：减少单帧解析瓦片数、或延后/分帧应用 Worker 结果（需改逻辑）。
+
 **注意**：请确保通过`window.Cesium`能够访问到可用的 Cesium 包，例如：
 
 ```js

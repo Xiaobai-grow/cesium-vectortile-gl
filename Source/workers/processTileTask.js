@@ -38,25 +38,18 @@ function parseTile(buffer, encoding) {
 }
 
 /**
- * 处理单瓦片任务：解析 + 过滤；后续步骤在此扩展几何构建。
- * @param {object} parameters
- * @param {Record<string,{buffer:ArrayBuffer,encoding:string}>} parameters.sources
- * @param {number} parameters.x
- * @param {number} parameters.y
- * @param {number} parameters.z
- * @param {number} [parameters.extent]
- * @param {Array<{id:string,type:string,source:string,sourceLayer?:string,filter?:object,paint?:object,layout?:object}>} parameters.styleLayers
- * @returns {{ fill: Array, line: Array, symbol: Array, parsedSources?: object }}
+ * 处理单瓦片：解析 + 过滤 + 几何构建。供 processTileTask 单片或批调用。
+ * @param {object} oneParams
+ * @param {Record<string,{buffer:ArrayBuffer,encoding:string}>} oneParams.sources
+ * @param {number} oneParams.x
+ * @param {number} oneParams.y
+ * @param {number} oneParams.z
+ * @param {number} [oneParams.extent]
+ * @param {Array<{id:string,type:string,source:string,sourceLayer?:string,filter?:object,paint?:object,layout?:object}>} oneParams.styleLayers
+ * @returns {{ fill: Array, line: Array, symbol: Array }}
  */
-export function processTileTask(parameters) {
-  const {
-    sources = {},
-    x,
-    y,
-    z,
-    extent = EXTENT,
-    styleLayers = []
-  } = parameters
+function processSingleTile(oneParams) {
+  const { sources = {}, x, y, z, extent = EXTENT, styleLayers = [] } = oneParams
 
   const parsedSources = {}
   for (const sourceId in sources) {
@@ -66,7 +59,7 @@ export function processTileTask(parameters) {
     }
   }
 
-  const result = { fill: [], line: [], symbol: [] }
+  const layerResult = { fill: [], line: [], symbol: [] }
 
   for (const layerSpec of styleLayers) {
     if (layerSpec.type === 'background') continue
@@ -87,7 +80,7 @@ export function processTileTask(parameters) {
 
     const type = layerSpec.type
     if (type === 'fill' || type === 'line' || type === 'symbol') {
-      result[type].push({
+      layerResult[type].push({
         layerId: layerSpec.id,
         source: layerSpec.source,
         sourceLayer: layerName,
@@ -101,9 +94,23 @@ export function processTileTask(parameters) {
     }
   }
 
-  // 几何构建在 Worker 内完成，只把可序列化数据 + transferable buffers 传回主线程；
-  // 此处先做解析+过滤，几何构建在 buildGeometryInWorker 中扩展
-  return buildGeometryResult(result, extent, x, y, z)
+  return buildGeometryResult(layerResult, extent, x, y, z)
+}
+
+/**
+ * 处理瓦片任务：支持单瓦片或批瓦片。批时 parameters.tiles 为数组，styleLayers 共用。
+ * @param {object} parameters - 单瓦片时同 processSingleTile；批时 { tiles: Array<{x,y,z,extent,sources}>, styleLayers }
+ * @returns {{ tiles: Array<{ fill, line, symbol }> }}
+ */
+export function processTileTask(parameters) {
+  const styleLayers = parameters.styleLayers || []
+  if (Array.isArray(parameters.tiles) && parameters.tiles.length > 0) {
+    const tiles = parameters.tiles.map(t =>
+      processSingleTile({ ...t, styleLayers })
+    )
+    return { tiles }
+  }
+  return { tiles: [processSingleTile(parameters)] }
 }
 
 /**

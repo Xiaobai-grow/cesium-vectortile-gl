@@ -18,14 +18,14 @@ self.onmessage = function (e) {
 }
 
 /**
- * 从 result 中收集可 transfer 的 ArrayBuffer，用于 postMessage 的 transferList
- * @param {object} result - { fill: [{ batches: [...] }], line: [{ batches: [...] }], symbol: [...] }
+ * 从单瓦片结果中收集可 transfer 的 ArrayBuffer
+ * @param {object} tileResult - { fill: [{ batches: [...] }], line: [{ batches: [...] }], symbol: [...] }
  * @param {ArrayBuffer[]} transferList
  */
-function collectTransferables(result, transferList) {
-  if (!result) return
+function collectTransferablesFromTile(tileResult, transferList) {
+  if (!tileResult) return
   for (const key of ['fill', 'line']) {
-    const arr = result[key]
+    const arr = tileResult[key]
     if (!Array.isArray(arr)) continue
     for (const layer of arr) {
       const batches = layer.batches
@@ -37,5 +37,17 @@ function collectTransferables(result, transferList) {
         if (batch.indices?.buffer) transferList.push(batch.indices.buffer)
       }
     }
+  }
+}
+
+/**
+ * 从 result 中收集可 transfer 的 ArrayBuffer；支持 result.tiles 批格式。
+ * @param {object} result - { tiles: [ { fill, line, symbol }... ] }
+ * @param {ArrayBuffer[]} transferList
+ */
+function collectTransferables(result, transferList) {
+  if (!result || !Array.isArray(result.tiles)) return
+  for (const tileResult of result.tiles) {
+    collectTransferablesFromTile(tileResult, transferList)
   }
 }

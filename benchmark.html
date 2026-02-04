@@ -97,6 +97,33 @@
         <input type="checkbox" id="swapMode" />
         <span>调换左右模式</span>
       </label>
+      <label style="display: flex; align-items: center; gap: 6px">
+        <span>每批瓦片数:</span>
+        <select id="workerBatchSize">
+          <option value="1">1</option>
+          <option value="2" selected>2</option>
+          <option value="3">3</option>
+          <option value="4">4</option>
+        </select>
+      </label>
+      <label style="display: flex; align-items: center; gap: 6px">
+        <span>每帧最大初始化:</span>
+        <select id="maxInitializing">
+          <option value="6">6</option>
+          <option value="12" selected>12</option>
+          <option value="16">16</option>
+          <option value="24">24</option>
+        </select>
+      </label>
+      <label style="display: flex; align-items: center; gap: 6px">
+        <span>小瓦片阈值(字节):</span>
+        <select id="workerMinBytes">
+          <option value="0" selected>0(全走Worker)</option>
+          <option value="4096">4096</option>
+          <option value="8192">8192</option>
+          <option value="16384">16384</option>
+        </select>
+      </label>
       <span id="status"
         >左侧=主线程，右侧=Worker。15 秒内各 100 个 Box（边长
         50000）加载与路径漫游。</span
@@ -135,11 +162,27 @@
       runBtn.addEventListener('click', async () => {
         runBtn.disabled = true
         const swap = swapCheckbox.checked
+        const workerBatchSize = parseInt(
+          document.getElementById('workerBatchSize').value,
+          10
+        )
+        const maxInitializing = parseInt(
+          document.getElementById('maxInitializing').value,
+          10
+        )
+        const workerMinBytes = parseInt(
+          document.getElementById('workerMinBytes').value,
+          10
+        )
         status.textContent = swap
           ? '运行中：先左侧 Worker 15 秒，再右侧主线程 15 秒，结果分开并对比…'
           : '运行中：先左侧主线程 15 秒，再右侧 Worker 15 秒，结果分开并对比…'
         reportEl.textContent = ''
-        await runBenchmark(swap)
+        await runBenchmark(swap, {
+          workerBatchSize,
+          maxInitializing,
+          workerMinBytes
+        })
         status.textContent = '测试完成。'
         runBtn.disabled = false
       })

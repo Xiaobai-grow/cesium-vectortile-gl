@@ -11,10 +11,10 @@ const LONG_FRAME_MS = 50
 /** 路径漫游：同一路径关键帧 (t 为 0..1) */
 const FLY_PATH = [
   { t: 0, longitude: -100, latitude: 40, height: 5_000_000 },
-  { t: 0.25, longitude: -96, latitude: 39.5, height: 3_500_000 },
-  { t: 0.5, longitude: -92, latitude: 39, height: 2_000_000 },
-  { t: 0.75, longitude: -94, latitude: 40, height: 3_500_000 },
-  { t: 1, longitude: -98, latitude: 39, height: 5_000_000 }
+  { t: 0.25, longitude: -52, latitude: 39.5, height: 3_500_000 },
+  { t: 0.5, longitude: -14, latitude: 39, height: 2_000_000 },
+  { t: 0.75, longitude: 30, latitude: 40, height: 3_500_000 },
+  { t: 1, longitude: 100, latitude: 39, height: 5_000_000 }
 ]
 
 /** 漫游时 Box 随机分布范围（与路径可见范围一致） */
@@ -181,8 +181,9 @@ function log(msg, reportEl = null) {
 /**
  * 先跑左侧 15 秒，再跑右侧 15 秒，分别采集帧时间，输出分开的结果并对比。
  * @param {boolean} [swap=false] - 为 true 时左侧用 Worker、右侧用主线程
+ * @param {object} [options] - { workerBatchSize, maxInitializing, workerMinBytes } 用于对比不同 Worker 参数
  */
-async function runBenchmark(swap = false) {
+async function runBenchmark(swap = false, options = {}) {
   const containerMain = document.getElementById('viewer-main')
   const containerWorker = document.getElementById('viewer-worker')
   const reportEl = getReportEl()
@@ -191,6 +192,12 @@ async function runBenchmark(swap = false) {
     return
   }
 
+  const workerBatchSize = Math.max(
+    1,
+    Math.min(4, (options.workerBatchSize ?? 2) | 0)
+  )
+  const maxInitializing = Math.max(1, (options.maxInitializing ?? 12) | 0)
+  const workerMinBytes = Math.max(0, (options.workerMinBytes ?? 0) | 0)
   const leftLabel = swap ? 'Worker' : '主线程'
   const rightLabel = swap ? '主线程' : 'Worker'
   reportEl.textContent =
@@ -205,11 +212,20 @@ async function runBenchmark(swap = false) {
     console.log(msg)
   }
 
+  const workerTilesetOptions = () => ({
+    style: '/assets/demotiles/style.json',
+    workerUrl,
+    maximumActiveTasks: 4,
+    workerBatchSize,
+    maxInitializing,
+    workerMinBytes: workerMinBytes || undefined
+  })
+
   try {
     const boxPositions = generateRandomBoxPositions(BENCH_BOX_COUNT)
 
     append(
-      `测试：各 ${BENCH_DURATION_MS / 1000} 秒，${BENCH_BOX_COUNT} 个 Box（边长 50000）加载与路径漫游。左侧=${leftLabel}，右侧=${rightLabel}。\n`
+      `测试：各 ${BENCH_DURATION_MS / 1000} 秒，${BENCH_BOX_COUNT} 个 Box。左侧=${leftLabel}，右侧=${rightLabel}。Worker: 每批=${workerBatchSize}，每帧最大初始化=${maxInitializing}，小瓦片阈值=${workerMinBytes} 字节。\n`
     )
 
     /* 左侧：swap 时用 Worker，否则用主线程 */
@@ -220,13 +236,7 @@ async function runBenchmark(swap = false) {
     viewerLeft.scene.globe.depthTestAgainstTerrain = false
     viewerLeft.scene.debugShowFramesPerSecond = false
     const tilesetLeft = new VectorTileset(
-      swap
-        ? {
-            style: '/assets/demotiles/style.json',
-            workerUrl,
-            maximumActiveTasks: 4
-          }
-        : { style: '/assets/demotiles/style.json' }
+      swap ? workerTilesetOptions() : { style: '/assets/demotiles/style.json' }
     )
     viewerLeft.scene.primitives.add(tilesetLeft)
     addBoxesToViewer(viewerLeft, boxPositions)
@@ -258,13 +268,7 @@ async function runBenchmark(swap = false) {
     viewerRight.scene.globe.depthTestAgainstTerrain = false
     viewerRight.scene.debugShowFramesPerSecond = false
     const tilesetRight = new VectorTileset(
-      swap
-        ? { style: '/assets/demotiles/style.json' }
-        : {
-            style: '/assets/demotiles/style.json',
-            workerUrl,
-            maximumActiveTasks: 4
-          }
+      swap ? { style: '/assets/demotiles/style.json' } : workerTilesetOptions()
     )
     viewerRight.scene.primitives.add(tilesetRight)
     addBoxesToViewer(viewerRight, boxPositions)
@@ -303,6 +307,8 @@ async function runBenchmark(swap = false) {
 
     reportEl.innerHTML = [
       '<pre>',
+      `Worker 每批瓦片数: ${workerBatchSize}  每帧最大初始化: ${maxInitializing}  小瓦片阈值: ${workerMinBytes} 字节`,
+      '',
       formatReport('左侧（' + leftLabel + '）', leftStats),
       '',
       formatReport('右侧（' + rightLabel + '）', rightStats),
