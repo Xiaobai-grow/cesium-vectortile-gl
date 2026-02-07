@@ -6,6 +6,7 @@ import { Sources } from './sources'
 import { ISource } from './sources/ISource'
 import { warnOnce } from 'maplibre-gl/src/util/util'
 import { SymbolPlacements } from './symbol/SymbolPlacements'
+import { SpriteAtlas } from './sprite'
 
 export class VectorTileset {
   /**
@@ -50,6 +51,11 @@ export class VectorTileset {
      * 负责符号碰撞检测（自动避让），SymbolPlacements 内部基于 maplibre-gl GridIndex 实现
      */
     this._symbolPlacements = new SymbolPlacements()
+    /**
+     * MapLibre 风格 sprite 图集（图标雪碧图），由 style.sprite 加载，供 symbol 图层 icon-image 使用
+     * @type {import('./sprite/SpriteAtlas').SpriteAtlas|null}
+     */
+    this.spriteAtlas = null
 
     requestAnimationFrame(() => {
       this.init()
@@ -95,6 +101,13 @@ export class VectorTileset {
     //初始化样式图层
     for (let i = 0; i < style.layers.length; i++) {
       this._styleLayers[i] = new StyleLayer(style.layers[i])
+    }
+
+    // 加载 sprite（MapLibre 规范：sprite 基础 URL，引擎请求 .json + .png，高清屏请求 @2x）
+    if (style.sprite) {
+      const atlas = new SpriteAtlas(style.sprite, this.path)
+      await atlas.load()
+      this.spriteAtlas = atlas
     }
 
     //创建顶级瓦片LOD
@@ -313,6 +326,11 @@ export class VectorTileset {
       this.tileIdTexture = null
       this._tileIdFbo = null
       this._idClearCommand = null
+    }
+
+    if (this.spriteAtlas) {
+      this.spriteAtlas.destroy()
+      this.spriteAtlas = null
     }
 
     this._styleJson = null

@@ -14,6 +14,8 @@ export class SymbolRenderLayer extends IRenderLayer {
   constructor(sourceFeatures, styleLayer, tile) {
     super(sourceFeatures, styleLayer, tile)
     this.labels = []
+    /** @type {Cesium.Billboard[]} */
+    this.billboards = []
   }
 
   /**

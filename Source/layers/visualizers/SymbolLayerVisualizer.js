@@ -31,7 +31,11 @@ export class SymbolLayerVisualizer extends ILayerVisualizer {
 
     /**@type {Cesium.Label[]} */
     this.labels = []
+    /**@type {Cesium.Billboard[]} */
+    this.billboards = []
     this.primitive = null
+    /** @type {Cesium.BillboardCollection|null} */
+    this.billboardCollection = null
     this.dotCutOff = 0.0035
   }
 
@@ -70,8 +74,9 @@ export class SymbolLayerVisualizer extends ILayerVisualizer {
    */
   addLayer(features, layer, frameState, tileset) {
     const style = layer.style
-    const { tile, labels } = this
+    const { tile, labels, billboards } = this
     const rectangle = tile.rectangle
+    const atlas = tileset.spriteAtlas
 
     function addText(
       coord,
@@ -117,6 +122,29 @@ export class SymbolLayerVisualizer extends ILayerVisualizer {
       layer.labels.push(label)
     }
 
+    function addIcon(coord, iconMeta, iconSize, iconAnchor, iconColor, layer) {
+      if (
+        !Cesium.Rectangle.contains(
+          rectangle,
+          Cesium.Cartographic.fromDegrees(coord[0], coord[1])
+        )
+      ) {
+        return
+      }
+      const origin = getOrigin(iconAnchor)
+      const batchId = billboards.length
+      billboards.push({
+        position: Cesium.Cartesian3.fromDegrees(coord[0], coord[1]),
+        subRegion: iconMeta.subRegion,
+        scale: iconSize,
+        horizontalOrigin: origin.horizontal,
+        verticalOrigin: origin.vertical,
+        color: iconColor,
+        batchId
+      })
+      layer.billboards.push(batchId)
+    }
+
     for (const sourceFeature of features) {
       const feature = sourceFeature.toGeoJSON(tile.x, tile.y, tile.z)
       if (!feature.geometry) continue
@@ -142,11 +170,18 @@ export class SymbolLayerVisualizer extends ILayerVisualizer {
         }
         text = text.toString()
       }
-      if (iconImage) {
-        warnOnce('symbol图层：不支持图标')
-        continue
+
+      const icon =
+        iconImage && atlas?.loaded
+          ? atlas.getIcon(String(iconImage).trim())
+          : null
+      if (iconImage && (!atlas || !atlas.loaded)) {
+        warnOnce('symbol图层：style.sprite 未配置或未加载完成，图标不可用')
       }
-      if (!text) {
+      if (iconImage && atlas?.loaded && !icon) {
+        warnOnce('symbol图层：sprite 中未找到图标 "' + iconImage + '"')
+      }
+      if (!text && !icon) {
         continue
       }
 
@@ -212,24 +247,29 @@ export class SymbolLayerVisualizer extends ILayerVisualizer {
         sourceFeature
       )
 
+      const iconSize =
+        style.layout.getDataValue('icon-size', tile.z, sourceFeature) || 1
+      const iconAnchor =
+        style.layout.getDataValue('icon-anchor', tile.z, sourceFeature) ||
+        'center'
+      const iconColorRaw = style.paint.getDataValue(
+        'icon-color',
+        tile.z,
+        sourceFeature
+      )
+      const iconColor = iconColorRaw
+        ? style.convertColor(iconColorRaw)
+        : Cesium.Color.WHITE.clone()
+
       const geometryType = feature.geometry.type
       const coordinates = feature.geometry.coordinates
       if (geometryType == 'Point') {
-        addText(
-          coordinates,
-          text,
-          font,
-          textSize,
-          textColor,
-          outlineWidth,
-          outlineColor,
-          textOffset,
-          textOrigin
-        )
-      } else if (geometryType == 'MultiPoint') {
-        coordinates.forEach(coord => {
+        if (icon) {
+          addIcon(coordinates, icon, iconSize, iconAnchor, iconColor, layer)
+        }
+        if (text) {
           addText(
-            coord,
+            coordinates,
             text,
             font,
             textSize,
@@ -239,12 +279,34 @@ export class SymbolLayerVisualizer extends ILayerVisualizer {
             textOffset,
             textOrigin
           )
+        }
+      } else if (geometryType == 'MultiPoint') {
+        coordinates.forEach(coord => {
+          if (icon) {
+            addIcon(coord, icon, iconSize, iconAnchor, iconColor, layer)
+          }
+          if (text) {
+            addText(
+              coord,
+              text,
+              font,
+              textSize,
+              textColor,
+              outlineWidth,
+              outlineColor,
+              textOffset,
+              textOrigin
+            )
+          }
         })
       } else {
         warnOnce('symbol图层：不支持符号沿线布局')
       }
     }
 
+    if (atlas && billboards.length > 0) {
+      this._spriteAtlas = atlas
+    }
     this.layers.push(layer)
   }
 
@@ -313,30 +375,68 @@ export class SymbolLayerVisualizer extends ILayerVisualizer {
   }
 
   createPrimitive() {
-    //所有图层的文字共用一个LabelCollection
-    //注意：这样文字就没有了“图层”的特征了，渲染顺序可能和样式配置的不一致
-    //优化：参考 maplibre-gl 的符号系统实现，但工作量巨大，如有需求建议使用商业版（Mesh-3D矢量地图引擎）
-
-    const primitive = new Cesium.LabelCollection()
-    for (let i = 0; i < this.labels.length; i++) {
-      this.labels[i] = primitive.add(this.labels[i])
-    }
-
-    /**@type {SymbolRenderLayer[]} */
-    const layers = this.layers
-    for (const layer of layers) {
-      for (let i = 0; i < layer.labels.length; i++) {
-        layer.labels[i] = this.labels[layer.labels[i].batchId]
+    // 所有图层的文字共用一个 LabelCollection
+    if (this.labels.length > 0) {
+      const primitive = new Cesium.LabelCollection()
+      for (let i = 0; i < this.labels.length; i++) {
+        this.labels[i] = primitive.add(this.labels[i])
       }
+      /**@type {SymbolRenderLayer[]} */
+      const layers = this.layers
+      for (const layer of layers) {
+        for (let i = 0; i < layer.labels.length; i++) {
+          layer.labels[i] = this.labels[layer.labels[i].batchId]
+        }
+      }
+      this.primitive = primitive
     }
 
-    this.primitive = primitive
+    // 所有图层的图标共用一个 BillboardCollection，共用 sprite 纹理
+    if (this.billboards.length > 0 && this._spriteAtlas) {
+      const atlas = this._spriteAtlas
+      const image = atlas.getImage()
+      if (!image) {
+        return
+      }
+      const collection = new Cesium.BillboardCollection()
+      for (let i = 0; i < this.billboards.length; i++) {
+        const d = this.billboards[i]
+        const b = collection.add({
+          position: d.position,
+          image,
+          imageSubRegion: d.subRegion,
+          scale: d.scale,
+          horizontalOrigin: d.horizontalOrigin,
+          verticalOrigin: d.verticalOrigin,
+          color: d.color,
+          disableDepthTestDistance: Infinity
+        })
+        b.batchId = d.batchId
+        b._baseColor = d.color.clone()
+        b.vtAlpha = 0
+        b.vtPlaceable = true
+        this.billboards[i] = b
+      }
+      for (const layer of this.layers) {
+        for (let i = 0; i < layer.billboards.length; i++) {
+          const idx = layer.billboards[i]
+          layer.billboards[i] = this.billboards[idx]
+        }
+      }
+      this.billboardCollection = collection
+    }
   }
 
   update(frameState, tileset) {
     if (this.state !== 'none') return
 
-    if (!this.primitive && this.labels?.length) {
+    const hasLabels = this.labels?.length > 0
+    const needCreate =
+      (hasLabels && !this.primitive) ||
+      (this.billboards?.length > 0 &&
+        this._spriteAtlas &&
+        !this.billboardCollection)
+    if (needCreate) {
       this.createPrimitive()
     }
 
@@ -355,7 +455,22 @@ export class SymbolLayerVisualizer extends ILayerVisualizer {
       if (this.primitive._state === Cesium.PrimitiveState.FAILED) {
         this.setState('error')
       }
-    } else if (this.state === 'none' && this.labels.length === 0) {
+    }
+    if (this.billboardCollection) {
+      this.commandList.length = 0
+      const preCommandList = frameState.commandList
+      frameState.commandList = this.commandList
+      this.billboardCollection.update(frameState)
+      frameState.commandList = preCommandList
+      if (this.state === 'none' && preCommandList.length > 0) {
+        this.setState('done')
+      }
+    }
+    if (
+      this.state === 'none' &&
+      this.labels.length === 0 &&
+      (!this.billboards || this.billboards.length === 0)
+    ) {
       this.setState('done')
     }
   }
@@ -412,11 +527,50 @@ export class SymbolLayerVisualizer extends ILayerVisualizer {
         label.show = !this.isOccluded(cameraPositionWC, label.position)
     }
 
+    // 图标图层：可见性、缩放层级、淡入淡出
+    for (const layer of layers) {
+      const style = layer.style
+      const zoom = tileset.zoom
+      const hide =
+        layer.visibility === 'none' ||
+        zoom < style.minzoom ||
+        zoom >= style.maxzoom
+      for (let i = 0; i < layer.billboards.length; i++) {
+        const b = layer.billboards[i]
+        if (!b || !b._baseColor) continue
+        if (hide) {
+          b.show = false
+          continue
+        }
+        if (b.vtAlpha == null) b.vtAlpha = b.vtPlaceable ? 1 : 0
+        const targetAlpha = b.vtPlaceable ? 1 : 0
+        b.vtAlpha = Cesium.Math.lerp(b.vtAlpha ?? 0, targetAlpha, FADE_SPEED)
+        if (b.vtAlpha < 0.001) {
+          b.vtAlpha = 0
+          b.show = false
+        } else {
+          b.show = true
+          b.color = b._baseColor.withAlpha(b._baseColor.alpha * b.vtAlpha)
+        }
+      }
+    }
+    for (const b of this.billboards) {
+      if (b.show && b.position)
+        b.show = !this.isOccluded(cameraPositionWC, b.position)
+    }
+
     if (this.primitive) {
       this.commandList.length = 0
       const preCommandList = frameState.commandList
       frameState.commandList = this.commandList
       this.primitive.update(frameState)
+      frameState.commandList = preCommandList
+    }
+    if (this.billboardCollection) {
+      this.commandList.length = 0
+      const preCommandList = frameState.commandList
+      frameState.commandList = this.commandList
+      this.billboardCollection.update(frameState)
       frameState.commandList = preCommandList
     }
 
@@ -425,6 +579,9 @@ export class SymbolLayerVisualizer extends ILayerVisualizer {
 
   destroy() {
     this.primitive = this.primitive && this.primitive.destroy()
+    this.billboardCollection =
+      this.billboardCollection && this.billboardCollection.destroy()
+    this._spriteAtlas = null
     super.destroy()
   }
 

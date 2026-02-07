@@ -1,0 +1,63 @@
+{
+  "version": 8,
+  "name": "MapLibre with Sprite Icons",
+  "glyphs": "https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf",
+  "sprite": "https://demotiles.maplibre.org/styles/osm-bright-gl-style/sprite",
+  "sources": {
+    "maplibre": {
+      "url": "https://demotiles.maplibre.org/tiles/tiles.json",
+      "type": "vector"
+    }
+  },
+  "layers": [
+    {
+      "id": "background",
+      "type": "background",
+      "paint": { "background-color": "#D8F2FF" }
+    },
+    {
+      "id": "countries-fill",
+      "type": "fill",
+      "source": "maplibre",
+      "source-layer": "countries",
+      "paint": {
+        "fill-color": "#C1E599",
+        "fill-opacity": 0.6
+      }
+    },
+    {
+      "id": "coastline",
+      "type": "line",
+      "source": "maplibre",
+      "source-layer": "countries",
+      "paint": {
+        "line-color": "#198EC8",
+        "line-width": 1.5
+      }
+    },
+    {
+      "id": "country-icons",
+      "type": "symbol",
+      "source": "maplibre",
+      "source-layer": "centroids",
+      "minzoom": 2,
+      "maxzoom": 8,
+      "layout": {
+        "icon-image": "marker_11",
+        "icon-size": 1.2,
+        "icon-anchor": "bottom",
+        "text-field": "{NAME}",
+        "text-font": ["Open Sans Regular"],
+        "text-size": 11,
+        "text-offset": [0, -1.2],
+        "text-anchor": "top"
+      },
+      "paint": {
+        "icon-color": "#1976d2",
+        "text-color": "#0d47a1",
+        "text-halo-color": "rgba(255,255,255,0.9)",
+        "text-halo-width": 1
+      }
+    }
+  ]
+}
